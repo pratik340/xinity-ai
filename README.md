@@ -434,8 +434,10 @@ Ensure Docker Compose is running (`docker compose ps`). The `db` service must be
 **`BETTER_AUTH_SECRET` error on dashboard startup**
 The dashboard has no `.env`. Re-run step 3 to create it from `example.env`.
 
-**`bun2nix` is slow or fails during install**
-This runs in the postinstall hook for NixOS support. Run `CI=1 bun install` to skip it.
+**Git hook setup fails during install**
+The root `postinstall` script uses `simple-git-hooks` to install the commit-message and pre-commit hooks. Run `CI=1 bun install` to skip this hook setup.
+
+For local development, install the hooks after dependencies are installed with `bunx simple-git-hooks@2`.
 
 <details>
 <summary><strong>Licensing FAQ</strong></summary>
