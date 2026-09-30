@@ -99,7 +99,7 @@ export function createWorkflowCoordinator(
 
         if (ev?.type === "done") {
           if (acc.state.mode === "running" && acc.state.queued) {
-            return { state: { mode: "running", queued: false }, out: { type: "accept", trigger: { kind: "signal", source: "queued" } } };
+            return { state: { mode: "running", queued: false } };
           }
           return { state: { mode: "idle" } };
         }

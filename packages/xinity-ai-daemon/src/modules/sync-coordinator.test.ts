@@ -110,6 +110,7 @@ describe("createWorkflowCoordinator", () => {
     // Unblock the first run
     gate.resolve();
     await allDone.promise;
+    await tick(0);
 
     // Exactly 2 runs: initial + 1 queued. Extra signals are dropped.
     expect(runCount).toBe(2);
