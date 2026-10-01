@@ -87,16 +87,16 @@ export function syncOllamaInstallations$(
           const toAdd = resolved.filter((r) => !existingTags.has(r.tag));
 
           const stateMap = getLocalInstallationStates(
-           resolved.map((r) => r.installation.id)
+            resolved.map((r) => r.installation.id)
           );
-         const present = resolved.filter((r) => {
+          const present = resolved.filter((r) => {
             const state = stateMap.get(r.installation.id);
             return existingTags.has(r.tag) && state?.lifecycleState !== "ready";
-        });
+          });
 
           return { toRemove, toAdd, present };
         }),
-        tap(({ toRemove, toAdd }) => {
+        tap(({ toRemove, toAdd, present }) => {
           if (toRemove.length)
             log.info(
               { models: toRemove.map((i) => i.model) },
@@ -107,8 +107,13 @@ export function syncOllamaInstallations$(
               { models: toAdd.map((r) => r.tag) },
               "Adding installations"
             );
+          if (present.length)
+            log.info(
+              { models: present.map((r) => r.tag) },
+              "Reporting present installations as ready"
+            );
         }),
-        switchMap(({ toRemove, toAdd, present}) => {
+        switchMap(({ toRemove, toAdd, present }) => {
           const remove$ = from(toRemove).pipe(
             mergeMap(
               (i) => defer(() => from(getOllamaClient().delete({ model: i.model }))),
@@ -121,22 +126,19 @@ export function syncOllamaInstallations$(
           );
 
           const report$ = from(present).pipe(
-         mergeMap(
-            async ({ installation, tag }) => {
-               try {
+            mergeMap(async ({ installation, tag }) => {
+              try {
                 await updateInstallationState(installation.id, "ready", {
                   statusMessage: "Ollama model already present",
                 });
-           } catch (err) {
-                   log.error(
-               { err, tag, installationId: installation.id },
+              } catch (err) {
+                log.error(
+                  { err, tag, installationId: installation.id },
                   "Failed to update Ollama installation state"
-            );
-           }
-         },
-            OLLAMA_CONCURRENCY
-          )
-       );
+                );
+              }
+            }, OLLAMA_CONCURRENCY)
+          );
 
           return merge(remove$, add$, report$).pipe(ignoreElements(), endWith(void 0));
         })
