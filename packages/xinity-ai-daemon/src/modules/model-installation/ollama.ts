@@ -4,7 +4,7 @@ import { config } from "../../config";
 import type { SyncInstallation } from "../db-sync";
 import { rootLogger } from "../../logger";
 import { resolveInstallationEntry } from "./catalog";
-import { updateInstallationState } from "./state";
+import { updateInstallationState, getLocalInstallationStates } from "./state";
 
 const log = rootLogger.child({ name: "ollama" });
 
@@ -86,9 +86,17 @@ export function syncOllamaInstallations$(
           );
           const toAdd = resolved.filter((r) => !existingTags.has(r.tag));
 
-          return { toRemove, toAdd };
+          const stateMap = getLocalInstallationStates(
+            resolved.map((r) => r.installation.id)
+          );
+          const present = resolved.filter((r) => {
+            const state = stateMap.get(r.installation.id);
+            return existingTags.has(r.tag) && state?.lifecycleState !== "ready";
+          });
+
+          return { toRemove, toAdd, present };
         }),
-        tap(({ toRemove, toAdd }) => {
+        tap(({ toRemove, toAdd, present }) => {
           if (toRemove.length)
             log.info(
               { models: toRemove.map((i) => i.model) },
@@ -99,8 +107,13 @@ export function syncOllamaInstallations$(
               { models: toAdd.map((r) => r.tag) },
               "Adding installations"
             );
+          if (present.length)
+            log.info(
+              { models: present.map((r) => r.tag) },
+              "Reporting present installations as ready"
+            );
         }),
-        switchMap(({ toRemove, toAdd }) => {
+        switchMap(({ toRemove, toAdd, present }) => {
           const remove$ = from(toRemove).pipe(
             mergeMap(
               (i) => defer(() => from(getOllamaClient().delete({ model: i.model }))),
@@ -112,7 +125,22 @@ export function syncOllamaInstallations$(
             mergeMap((r) => consumePull$(r), OLLAMA_CONCURRENCY)
           );
 
-          return merge(remove$, add$).pipe(ignoreElements(), endWith(void 0));
+          const report$ = from(present).pipe(
+            mergeMap(async ({ installation, tag }) => {
+              try {
+                await updateInstallationState(installation.id, "ready", {
+                  statusMessage: "Ollama model already present",
+                });
+              } catch (err) {
+                log.error(
+                  { err, tag, installationId: installation.id },
+                  "Failed to update Ollama installation state"
+                );
+              }
+            }, OLLAMA_CONCURRENCY)
+          );
+
+          return merge(remove$, add$, report$).pipe(ignoreElements(), endWith(void 0));
         })
       )
     )

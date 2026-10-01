@@ -3,18 +3,15 @@ import { mockDaemonConfig } from "../../mock-config";
 import { firstValueFrom } from "rxjs";
 import type { InstallationEntry } from "./catalog";
 
-// ---------------------------------------------------------------------------
-// Mocks: must be set up before importing the module under test
-// ---------------------------------------------------------------------------
-
 mock.module("../../config", () => ({ config: mockDaemonConfig({ STATE_DIR: "/tmp/test-state", INFOSERVER_URL: "http://localhost:8090", INFOSERVER_CACHE_TTL_MS: "0" }) }));
 
 const mockUpdateState = mock(() => Promise.resolve());
+const mockGetLocalInstallationStates = mock(() => new Map());
 
 mock.module("./state", () => ({
   updateInstallationState: mockUpdateState,
   getLocalInstallationState: () => undefined,
-  getLocalInstallationStates: () => new Map(),
+  getLocalInstallationStates: mockGetLocalInstallationStates,
 }));
 
 mock.module("../../logger", () => ({
@@ -28,8 +25,7 @@ mock.module("../../logger", () => ({
   },
 }));
 
-// Resolves to the specifier as the ollama tag, so test expectations can use
-// specifier and tag interchangeably.
+
 const mockResolveEntry = mock<(specifier: string, engine: string) => Promise<Pick<InstallationEntry, "engineSpecifier"> | undefined>>(
   (specifier) => Promise.resolve({ engineSpecifier: specifier }),
 );
@@ -53,9 +49,6 @@ mock.module("ollama", () => ({
 
 const { syncOllamaInstallations$ } = await import("./ollama");
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function makeInstallation(specifier: string, id = crypto.randomUUID()) {
   return {
@@ -70,16 +63,14 @@ function makeInstallation(specifier: string, id = crypto.randomUUID()) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("syncOllamaInstallations$", () => {
   beforeEach(() => {
     mockOllamaList.mockReset();
     mockOllamaDelete.mockReset();
     mockOllamaPull.mockReset();
     mockUpdateState.mockClear();
+    mockGetLocalInstallationStates.mockReset();
+    mockGetLocalInstallationStates.mockReturnValue(new Map());
     mockResolveEntry.mockReset();
     mockResolveEntry.mockImplementation((specifier) => Promise.resolve({ engineSpecifier: specifier }));
   });
@@ -94,6 +85,52 @@ describe("syncOllamaInstallations$", () => {
 
     expect(mockOllamaDelete).not.toHaveBeenCalled();
     expect(mockOllamaPull).not.toHaveBeenCalled();
+  });
+
+  test("reports ready for models already present", async () => {
+    mockOllamaList.mockResolvedValue({
+      models: [{ model: "llama3:latest" }],
+    });
+
+    const installations = [makeInstallation("llama3:latest")];
+    await firstValueFrom(syncOllamaInstallations$(installations));
+
+    expect(mockOllamaDelete).not.toHaveBeenCalled();
+    expect(mockOllamaPull).not.toHaveBeenCalled();
+    expect(mockUpdateState).toHaveBeenCalledTimes(1);
+    expect(mockUpdateState).toHaveBeenCalledWith(
+      installations[0]!.id,
+      "ready",
+      expect.objectContaining({ statusMessage: "Ollama model already present" }),
+    );
+  });
+
+  test("does not report ready when local state is already ready", async () => {
+    mockOllamaList.mockResolvedValue({
+      models: [{ model: "llama3:latest" }],
+    });
+
+    const installations = [makeInstallation("llama3:latest")];
+    mockGetLocalInstallationStates.mockReturnValue(
+      new Map([
+        [
+          installations[0]!.id,
+          {
+            lifecycleState: "ready",
+            progress: null,
+            statusMessage: null,
+            errorMessage: null,
+            failureLogs: null,
+          },
+        ],
+      ]),
+    );
+
+    await firstValueFrom(syncOllamaInstallations$(installations));
+
+    expect(mockUpdateState).not.toHaveBeenCalled();
+    expect(mockOllamaPull).not.toHaveBeenCalled();
+    expect(mockOllamaDelete).not.toHaveBeenCalled();
   });
 
   test("removes models not in desired list", async () => {
