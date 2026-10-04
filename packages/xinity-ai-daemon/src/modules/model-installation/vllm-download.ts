@@ -154,12 +154,23 @@ async function downloadFileToCache(
   if (fs.existsSync(blobPath)) return { etag, bytesDownloaded: 0 };
 
   const incompletePath = `${blobPath}.incomplete`;
-  const existingBytes = getFileSize(incompletePath);
+  let existingBytes = getFileSize(incompletePath);
 
-  const dlRes = await hfFetch(resolveUrl, {
-    headers: existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : {},
-    redirect: "follow",
-  });
+  let dlRes: Response;
+  try {
+    dlRes = await hfFetch(resolveUrl, {
+      headers: existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : {},
+      redirect: "follow",
+    });
+  } catch (error) {
+    if (existingBytes > 0 && error instanceof Error && error.message.startsWith("416 ")) {
+      fs.unlinkSync(incompletePath);
+      existingBytes = 0;
+      dlRes = await hfFetch(resolveUrl, { redirect: "follow" });
+    } else {
+      throw error;
+    }
+  }
 
   if (!dlRes.body) throw new Error(`No response body for ${filePath}`);
 

@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from "bun:test";
 import { mockDaemonConfig } from "../../mock-config";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -140,4 +140,81 @@ describe.skip("downloadModel (integration, real HF API)", () => {
     const restoredSize = fs.statSync(blobPath).size;
     expect(restoredSize).toBe(largestSize);
   }, 30_000);
+});
+
+describe("downloadModel resume edge cases", () => {
+  test("retries from scratch when a complete .incomplete file gets a 416", async () => {
+    const model = "test/model";
+    const commitHash = "a".repeat(40);
+    const etag = "test-etag";
+    const contents = new TextEncoder().encode("0123456789");
+
+    const repoDir = path.join(testCacheDir, "hub", `models--${model.replace("/", "--")}`);
+    const blobsDir = path.join(repoDir, "blobs");
+    fs.mkdirSync(blobsDir, { recursive: true });
+
+    const incompletePath = path.join(blobsDir, `${etag}.incomplete`);
+    const blobPath = path.join(blobsDir, etag);
+    fs.writeFileSync(incompletePath, contents);
+
+    const originalFetch = globalThis.fetch;
+    const symlinkSpy = spyOn(fs, "symlinkSync").mockImplementation(() => {});
+    let downloadAttempts = 0;
+    const progress: number[] = [];
+
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+
+      if (url === `https://huggingface.co/api/models/${model}`) {
+        return new Response(JSON.stringify({ sha: commitHash }), { status: 200 });
+      }
+
+      if (url === `https://huggingface.co/api/models/${model}/tree/${commitHash}?recursive=true`) {
+        return new Response(
+          JSON.stringify([{ type: "file", path: "model.gguf", size: contents.byteLength }]),
+          { status: 200 },
+        );
+      }
+
+      if (url === `https://huggingface.co/${model}/resolve/${commitHash}/model.gguf`) {
+        if (method === "HEAD") {
+          return new Response(null, {
+            status: 200,
+            headers: { etag: `"${etag}"` },
+          });
+        }
+
+        downloadAttempts++;
+
+        if (downloadAttempts === 1) {
+          expect(init?.headers).toEqual(
+            expect.objectContaining({ Range: `bytes=${contents.byteLength}-` }),
+          );
+          return new Response(null, { status: 416 });
+        }
+
+        expect(init?.headers).not.toEqual(
+          expect.objectContaining({ Range: expect.any(String) }),
+        );
+        return new Response(contents, { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+
+    try {
+      await downloadModel(model, async (value) => {
+        progress.push(value);
+      }, ["!*.gguf"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      symlinkSpy.mockRestore();
+    }
+
+    expect(downloadAttempts).toBe(2);
+    expect(progress.at(-1)).toBe(1);
+    expect(fs.existsSync(incompletePath)).toBe(false);
+    expect(new Uint8Array(fs.readFileSync(blobPath))).toEqual(contents);
+  });
 });
