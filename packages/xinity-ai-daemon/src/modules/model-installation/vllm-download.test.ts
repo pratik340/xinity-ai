@@ -172,12 +172,12 @@ describe("downloadModel resume edge cases", () => {
 
       if (url === `https://huggingface.co/api/models/${model}/tree/${commitHash}?recursive=true`) {
         return new Response(
-          JSON.stringify([{ type: "file", path: "model.gguf", size: contents.byteLength }]),
+          JSON.stringify([{ type: "file", path: "model.safetensors", size: contents.byteLength }]),
           { status: 200 },
         );
       }
 
-      if (url === `https://huggingface.co/${model}/resolve/${commitHash}/model.gguf`) {
+      if (url === `https://huggingface.co/${model}/resolve/${commitHash}/model.safetensors`) {
         if (method === "HEAD") {
           return new Response(null, {
             status: 200,
@@ -206,7 +206,7 @@ describe("downloadModel resume edge cases", () => {
     try {
       await downloadModel(model, async (value) => {
         progress.push(value);
-      }, ["!*.gguf"]);
+      });
     } finally {
       globalThis.fetch = originalFetch;
       symlinkSpy.mockRestore();
