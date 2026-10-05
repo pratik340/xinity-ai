@@ -92,6 +92,7 @@ mock.module("./page-cache", () => ({
 }));
 
 const { syncVllmInstallations$, computeGpuUtilization, buildVllmExtraArgs, concurrencyCap } = await import("./vllm");
+mock.restore();
 
 // ---------------------------------------------------------------------------
 // Helpers

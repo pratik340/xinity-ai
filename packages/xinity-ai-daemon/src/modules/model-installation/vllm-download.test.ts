@@ -20,7 +20,7 @@ mock.module("../../logger", () => ({
   },
 }));
 
-const { downloadModel } = (await import("./vllm-download?real" as string)) as typeof import("./vllm-download");
+const { downloadModel } = await import("./vllm-download");
 
 // ---------------------------------------------------------------------------
 // These tests hit the real HuggingFace API. They use a tiny public model
@@ -143,11 +143,20 @@ describe.skip("downloadModel (integration, real HF API)", () => {
 });
 
 describe("downloadModel resume edge cases", () => {
-  test("retries from scratch when a complete .incomplete file gets a 416", async () => {
+  beforeEach(() => {
+    fs.mkdirSync(testCacheDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(testCacheDir, { recursive: true, force: true });
+  });
+
+  test("retries from scratch when an oversized .incomplete file gets a 416", async () => {
     const model = "test/model";
     const commitHash = "a".repeat(40);
     const etag = "test-etag";
     const contents = new TextEncoder().encode("0123456789");
+    const staleContents = new TextEncoder().encode("01234567890");
 
     const repoDir = path.join(testCacheDir, "hub", `models--${model.replace("/", "--")}`);
     const blobsDir = path.join(repoDir, "blobs");
@@ -155,14 +164,14 @@ describe("downloadModel resume edge cases", () => {
 
     const incompletePath = path.join(blobsDir, `${etag}.incomplete`);
     const blobPath = path.join(blobsDir, etag);
-    fs.writeFileSync(incompletePath, contents);
+    fs.writeFileSync(incompletePath, staleContents);
 
-    const originalFetch = globalThis.fetch;
     const symlinkSpy = spyOn(fs, "symlinkSync").mockImplementation(() => {});
     let downloadAttempts = 0;
     const progress: number[] = [];
+    const downloadHeaders: RequestInit["headers"][] = [];
 
-    globalThis.fetch = (async (input, init) => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
       const url = String(input);
       const method = init?.method ?? "GET";
 
@@ -186,35 +195,38 @@ describe("downloadModel resume edge cases", () => {
         }
 
         downloadAttempts++;
+        downloadHeaders.push(init?.headers ?? {});
 
         if (downloadAttempts === 1) {
-          expect(init?.headers).toEqual(
-            expect.objectContaining({ Range: `bytes=${contents.byteLength}-` }),
-          );
           return new Response(null, { status: 416 });
         }
 
-        expect(init?.headers).not.toEqual(
-          expect.objectContaining({ Range: expect.any(String) }),
-        );
         return new Response(contents, { status: 200 });
       }
 
       throw new Error(`Unexpected fetch: ${method} ${url}`);
-    }) as typeof fetch;
+    }) as typeof fetch);
 
     try {
       await downloadModel(model, async (value) => {
         progress.push(value);
       });
     } finally {
-      globalThis.fetch = originalFetch;
+      fetchSpy.mockRestore();
       symlinkSpy.mockRestore();
     }
 
     expect(downloadAttempts).toBe(2);
+    expect(downloadHeaders[0]).toEqual(
+      expect.objectContaining({ Range: `bytes=${staleContents.byteLength}-` }),
+    );
+    expect(downloadHeaders[1]).not.toEqual(
+      expect.objectContaining({ Range: expect.any(String) }),
+    );
     expect(progress.at(-1)).toBe(1);
     expect(fs.existsSync(incompletePath)).toBe(false);
     expect(new Uint8Array(fs.readFileSync(blobPath))).toEqual(contents);
+
+
   });
 });
