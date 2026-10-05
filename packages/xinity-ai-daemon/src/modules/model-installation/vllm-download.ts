@@ -155,7 +155,7 @@ async function downloadFileToCache(
   if (fs.existsSync(blobPath)) return { etag, bytesDownloaded: 0 };
 
   const incompletePath = `${blobPath}.incomplete`;
-  let existingBytes = getFileSize(incompletePath);
+  const existingBytes = getFileSize(incompletePath);
 
   if (existingBytes === expectedSize) {
     fs.renameSync(incompletePath, blobPath);
