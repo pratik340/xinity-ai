@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach, spyOn } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterAll, spyOn } from "bun:test";
 import { mockDaemonConfig } from "../../mock-config";
 import { firstValueFrom } from "rxjs";
 import type { VllmOps } from "./vllm-ops";
@@ -83,16 +83,17 @@ mock.module("../statekeeper", () => ({
   }),
 }));
 
-mock.module("./vllm-download", () => ({
-  downloadModel: mock(() => Promise.resolve()),
-}));
+const vllmDownload = await import("./vllm-download");
+const downloadModelSpy = spyOn(vllmDownload, "downloadModel").mockResolvedValue(undefined);
 
 mock.module("./page-cache", () => ({
   dropPageCache: mock(() => Promise.resolve()),
 }));
 
 const { syncVllmInstallations$, computeGpuUtilization, buildVllmExtraArgs, concurrencyCap } = await import("./vllm");
-mock.restore();
+afterAll(() => {
+  downloadModelSpy.mockRestore();
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
