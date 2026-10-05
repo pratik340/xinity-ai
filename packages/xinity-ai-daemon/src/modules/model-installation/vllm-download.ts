@@ -34,7 +34,7 @@ function sumFileSizes(files: readonly HfFileEntry[]): number {
 
 async function hfFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...init?.headers } });
-  if (!res.ok && res.status !== 206) {
+  if (!res.ok && res.status !== 206 && res.status !== 416) {
     const body = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}. ${body}. URL: ${url}`);
   }
@@ -94,7 +94,7 @@ export async function downloadModel(
   let downloadedBytes = 0;
 
   for (const file of files) {
-    const { etag, bytesDownloaded } = await downloadFileToCache(model, file.path, blobsDir, commitHash, (bytes) => {
+    const { etag, bytesDownloaded } = await downloadFileToCache(model, file.path, blobsDir, commitHash, fileSize(file), (bytes) => {
       downloadedBytes += bytes;
       return onProgress(downloadedBytes / totalBytes);
     });
@@ -139,6 +139,7 @@ async function downloadFileToCache(
   filePath: string,
   blobsDir: string,
   commitHash: string,
+  expectedSize: number,
   onBytes: (bytes: number) => Promise<void>,
 ): Promise<{ etag: string; bytesDownloaded: number }> {
   const resolveUrl = `${HF_API_URL}/${model}/resolve/${commitHash}/${filePath}`;
@@ -156,28 +157,42 @@ async function downloadFileToCache(
   const incompletePath = `${blobPath}.incomplete`;
   let existingBytes = getFileSize(incompletePath);
 
-  let dlRes: Response;
-  try {
-    dlRes = await hfFetch(resolveUrl, {
-      headers: existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : {},
-      redirect: "follow",
-    });
-  } catch (error) {
-    if (existingBytes > 0 && error instanceof Error && error.message.startsWith("416 ")) {
-      fs.unlinkSync(incompletePath);
-      existingBytes = 0;
-      dlRes = await hfFetch(resolveUrl, { redirect: "follow" });
-    } else {
-      throw error;
-    }
+  if (existingBytes === expectedSize) {
+    fs.renameSync(incompletePath, blobPath);
+    return { etag, bytesDownloaded: expectedSize };
   }
+
+  const { response: dlRes, existingBytes: resumeBytes } = await fetchBlobResumable(
+    resolveUrl,
+    incompletePath,
+    existingBytes,
+  );
 
   if (!dlRes.body) throw new Error(`No response body for ${filePath}`);
 
-  const bytesDownloaded = await streamToFile(incompletePath, dlRes.body, existingBytes > 0 && dlRes.status === 206, onBytes);
+  const bytesDownloaded = await streamToFile(incompletePath, dlRes.body, resumeBytes > 0 && dlRes.status === 206, onBytes);
   fs.renameSync(incompletePath, blobPath);
 
-  return { etag, bytesDownloaded: bytesDownloaded + existingBytes };
+  return { etag, bytesDownloaded: bytesDownloaded + resumeBytes };
+}
+
+async function fetchBlobResumable(
+  resolveUrl: string,
+  incompletePath: string,
+  existingBytes: number,
+): Promise<{ response: Response; existingBytes: number }> {
+  let response = await hfFetch(resolveUrl, {
+    headers: existingBytes > 0 ? { Range: `bytes=${existingBytes}-` } : {},
+    redirect: "follow",
+  });
+
+  if (response.status === 416) {
+    fs.unlinkSync(incompletePath);
+    existingBytes = 0;
+    response = await hfFetch(resolveUrl, { redirect: "follow" });
+  }
+
+  return { response, existingBytes };
 }
 
 function getFileSize(filePath: string): number {
