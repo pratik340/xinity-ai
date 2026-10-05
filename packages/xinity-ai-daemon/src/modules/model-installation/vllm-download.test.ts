@@ -20,7 +20,7 @@ mock.module("../../logger", () => ({
   },
 }));
 
-const { downloadModel } = await import("./vllm-download");
+const { downloadModel } = (await import("./vllm-download?real" as string)) as typeof import("./vllm-download");
 
 // ---------------------------------------------------------------------------
 // These tests hit the real HuggingFace API. They use a tiny public model
