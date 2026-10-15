@@ -151,12 +151,15 @@ describe("saveResponse", () => {
 });
 
 describe("getResponse", () => {
-  test("serves from Redis without reading Postgres", async () => {
+  test("checks durable deletion before serving a cached response", async () => {
     const response = makeResponse({ status: "completed" });
-    redisGet.mockImplementation(async (key: string) => key.endsWith(":deleted") ? null : JSON.stringify(response));
+    redisGet.mockImplementation(async (key: string) =>
+      key.endsWith(":deleted") ? null : JSON.stringify(response)
+    );
 
     expect(await getResponse("org-1", RESP_A)).toEqual(response);
-    expect(capturedQueries).toHaveLength(0);
+    expect(capturedQueries).toHaveLength(1);
+    expect(capturedQueries[0]?.sql).toContain("api_response_deletion");
   });
 
   test("falls back to Postgres once Redis has expired the entry", async () => {
