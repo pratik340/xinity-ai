@@ -183,8 +183,8 @@ describe("createPersistedResponse", () => {
       ...OWNER,
       inputMessages: [],
     });
-    const [insert] = capturedQueries;
-    expect(insert?.sql).toMatch(/^\s*insert/i);
+    const insert = capturedQueries.find((q) => /^\s*insert/i.test(q.sql) && q.sql.includes("api_response"));
+    expect(capturedQueries.some((q) => q.sql.includes("pg_advisory_xact_lock"))).toBe(true);
     expect(insert?.params).toContain("in_progress");
     expect(insert?.params).not.toContain("completed");
   });
@@ -195,7 +195,8 @@ describe("createPersistedResponse", () => {
       ...OWNER,
       inputMessages: [{ role: "user", content: "Hi" }],
     });
-    expect(capturedQueries).toHaveLength(1);
+    expect(capturedQueries.some((q) => q.sql.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(capturedQueries.some((q) => /api_response_deletion/i.test(q.sql))).toBe(true);
   });
 });
 

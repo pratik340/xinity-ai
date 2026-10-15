@@ -26,7 +26,13 @@ jest.spyOn(preparedProto, "execute").mockImplementation(async function (this: { 
   if (/^\s*insert/i.test(this.queryString)) {
     return [{ id: UUID_A }];
   }
-  return /^\s*select/i.test(this.queryString) ? selectRows : [];
+  if (/^\s*select/i.test(this.queryString)) {
+    if (this.queryString.includes('"api_response_deletion"')) {
+      return [];
+    }
+    return selectRows;
+  }
+  return [];
 });
 
 mock.module("../db", () => ({ getDB: () => db }));
@@ -36,6 +42,7 @@ const { saveResponse, getResponse, deleteResponse } = await import("./response-s
 const redisGet = spyOn(redis, "get");
 const redisSet = spyOn(redis, "set");
 const redisDel = spyOn(redis, "del");
+const redisSend = spyOn(redis, "send");
 
 const sqlOf = (pattern: RegExp) => capturedQueries.filter((q) => pattern.test(q.sql));
 
@@ -46,6 +53,7 @@ beforeEach(() => {
   redisGet.mockClear().mockResolvedValue(null);
   redisSet.mockClear().mockResolvedValue("OK" as never);
   redisDel.mockClear().mockResolvedValue(1 as never);
+  redisSend.mockClear().mockResolvedValue(1 as never);
 });
 
 const UUID_A = "11111111-1111-4111-8111-111111111111";
@@ -94,13 +102,29 @@ const CREATION = { apiKeyId: "key-1", applicationId: "app-1", inferenceCallId: n
 describe("saveResponse", () => {
   test("records a new response when given creation context", async () => {
     await saveResponse("org-1", RESP_A, makeResponse(), CREATION);
-    expect(redisSet).toHaveBeenCalled();
+    expect(redisSend).toHaveBeenCalled();
     expect(sqlOf(/^\s*insert into "call_data"\."api_response"/i)).toHaveLength(1);
   });
 
   test("treats an in-progress write without creation context as cache-only", async () => {
     await saveResponse("org-1", RESP_A, makeResponse());
-    expect(redisSet).toHaveBeenCalled();
+    expect(redisSend).toHaveBeenCalled();
+    expect(capturedQueries).toHaveLength(0);
+  });
+
+  test("does not persist a response when the atomic cache write rejects it", async () => {
+    redisSend.mockResolvedValueOnce(0 as never);
+
+    await saveResponse("org-1", RESP_A, makeResponse({ status: "completed" }));
+
+    expect(capturedQueries).toHaveLength(0);
+  });
+
+  test("does not persist a late response write after deletion marker blocks cache", async () => {
+    redisSend.mockResolvedValueOnce(0 as never);
+
+    await saveResponse("org-1", RESP_A, makeResponse({ status: "completed" }), CREATION);
+
     expect(capturedQueries).toHaveLength(0);
   });
 
@@ -115,21 +139,21 @@ describe("saveResponse", () => {
   test("keeps a store:false response out of Postgres entirely", async () => {
     await saveResponse("org-1", RESP_A, makeResponse({ store: false }), CREATION);
     await saveResponse("org-1", RESP_A, makeResponse({ store: false, status: "completed" }));
-    expect(redisSet).toHaveBeenCalledTimes(2);
+    expect(redisSend).toHaveBeenCalledTimes(2);
     expect(capturedQueries).toHaveLength(0);
   });
 
   test("does not fail the write when Postgres does", async () => {
     failNextQuery = true;
     await saveResponse("org-1", RESP_A, makeResponse(), CREATION);
-    expect(redisSet).toHaveBeenCalled();
+    expect(redisSend).toHaveBeenCalled();
   });
 });
 
 describe("getResponse", () => {
   test("serves from Redis without reading Postgres", async () => {
     const response = makeResponse({ status: "completed" });
-    redisGet.mockResolvedValue(JSON.stringify(response));
+    redisGet.mockImplementation(async (key: string) => key.endsWith(":deleted") ? null : JSON.stringify(response));
 
     expect(await getResponse("org-1", RESP_A)).toEqual(response);
     expect(capturedQueries).toHaveLength(0);
@@ -147,15 +171,24 @@ describe("getResponse", () => {
   test("re-caches what it recovered from Postgres", async () => {
     selectRows = [headerRow()];
     await getResponse("org-1", RESP_A);
-    expect(redisSet).toHaveBeenCalled();
+    expect(redisSend).toHaveBeenCalled();
   });
 
   test("returns null when neither tier has it", async () => {
     expect(await getResponse("org-1", RESP_A)).toBeNull();
   });
 
+  test("does not fall back to Postgres when a deletion marker exists", async () => {
+    redisGet.mockImplementation(async (key: string) =>
+      key.endsWith(":deleted") ? "1" : null
+    );
+
+    expect(await getResponse("org-1", RESP_A)).toBeNull();
+    expect(capturedQueries).toHaveLength(0);
+  });
+
   test("falls back to Postgres when the cached entry is corrupt", async () => {
-    redisGet.mockResolvedValue("{not json");
+    redisGet.mockImplementation(async (key: string) => key.endsWith(":deleted") ? null : "{not json");
     selectRows = [headerRow()];
     expect(await getResponse("org-1", RESP_A)).not.toBeNull();
   });
@@ -169,14 +202,14 @@ describe("getResponse", () => {
   test("does not slide the cache expiry on read", async () => {
     redisGet.mockResolvedValue(JSON.stringify(makeResponse()));
     await getResponse("org-1", RESP_A);
-    expect(redisSet).not.toHaveBeenCalled();
+    expect(redisSend).not.toHaveBeenCalled();
   });
 });
 
 describe("deleteResponse", () => {
   test("removes the response from both tiers", async () => {
     expect(await deleteResponse("org-1", RESP_A)).toBe(true);
-    expect(redisDel).toHaveBeenCalled();
+    expect(redisSend).toHaveBeenCalled();
     expect(sqlOf(/^\s*delete/i)).toHaveLength(1);
   });
 });

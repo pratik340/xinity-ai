@@ -1,6 +1,7 @@
 /** Durable storage for responses, backing retrieval once Redis has expired them. */
 import {
   apiResponseT,
+  apiResponseDeletionT,
   apiResponseItemT,
   apiResponseMessageT,
   apiResponseStatusEnum,
@@ -121,6 +122,18 @@ export async function createPersistedResponse(args: CreatePersistedResponseArgs)
   const { response, orgId, apiKeyId, applicationId, inferenceCallId, inputMessages } = args;
 
   await getDB().transaction(async (tx) => {
+    const id = storedId(response.id);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${orgId}::text || ':' || ${id}::text, 0))`);
+
+    const [deletion] = await tx
+      .select({ responseId: apiResponseDeletionT.responseId })
+      .from(apiResponseDeletionT)
+      .where(sql`${apiResponseDeletionT.responseId} = ${id} AND ${apiResponseDeletionT.organizationId} = ${orgId}`)
+      .limit(1);
+    if (deletion) {
+      return;
+    }
+
     const inserted = await tx
       .insert(apiResponseT)
       .values(toResponseRow(response, "in_progress", { orgId, apiKeyId, applicationId, inferenceCallId }))
@@ -209,6 +222,20 @@ export async function settlePersistedResponse(orgId: string, response: ResponseO
     }
     return true;
   });
+}
+
+/** Returns whether deletion has been durably recorded for this response ID. */
+export async function isResponseDeleted(orgId: string, responseId: string): Promise<boolean> {
+  const id = parseResponseId(responseId);
+  if (id === null) {
+    return false;
+  }
+  const [row] = await getDB()
+    .select({ responseId: apiResponseDeletionT.responseId })
+    .from(apiResponseDeletionT)
+    .where(sql`${apiResponseDeletionT.responseId} = ${id} AND ${apiResponseDeletionT.organizationId} = ${orgId}`)
+    .limit(1);
+  return Boolean(row);
 }
 
 export async function loadResponse(orgId: string, responseId: string): Promise<ResponseObject | null> {
@@ -321,6 +348,13 @@ export async function deletePersistedResponse(orgId: string, responseId: string)
   }
 
   await getDB().transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${orgId}::text || ':' || ${id}::text, 0))`);
+
+    await tx
+      .insert(apiResponseDeletionT)
+      .values({ responseId: id, organizationId: orgId })
+      .onConflictDoNothing();
+
     const messageIds = await messageIdsOfResponses([id], tx);
     await tx
       .delete(apiResponseT)
