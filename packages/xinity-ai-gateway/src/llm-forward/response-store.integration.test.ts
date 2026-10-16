@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { and, eq } from "drizzle-orm";
-import { apiResponseDeletionT, apiResponseT, organizationT } from "common-db";
+import { apiResponseT, organizationT } from "common-db";
 import { redis } from "../redis";
 import { getDB } from "../db";
 import { deleteResponse, getResponse, saveResponse } from "./response-store";
@@ -14,8 +14,6 @@ const dbResponseId = crypto.randomUUID();
 const responseId = `resp_${dbResponseId}`;
 const raceDbResponseId = crypto.randomUUID();
 const raceResponseId = `resp_${raceDbResponseId}`;
-const staleDbResponseId = crypto.randomUUID();
-const staleResponseId = `resp_${staleDbResponseId}`;
 let orgId: string | undefined;
 
 function makeResponse(status: ResponseObject["status"], id = responseId): ResponseObject {
@@ -40,14 +38,8 @@ describe.skipIf(!enabled)("response deletion integration (PostgreSQL + Redis)", 
 
   afterAll(async () => {
     if (!orgId) return;
-    for (const id of [dbResponseId, raceDbResponseId, staleDbResponseId]) {
-      await getDB().delete(apiResponseDeletionT).where(
-        and(eq(apiResponseDeletionT.organizationId, orgId), eq(apiResponseDeletionT.responseId, id)),
-      );
-    }
-    for (const id of [responseId, raceResponseId, staleResponseId]) {
-      const key = `response:${orgId}:${id}`;
-      await redis.send("DEL", [key, `${key}:deleted`]).catch(() => undefined);
+    for (const id of [responseId, raceResponseId]) {
+      await redis.del(`response:${orgId}:${id}`).catch(() => undefined);
     }
   });
 
@@ -63,28 +55,6 @@ describe.skipIf(!enabled)("response deletion integration (PostgreSQL + Redis)", 
     await saveResponse(orgId, responseId, makeResponse("completed"));
 
     expect(await getResponse(orgId, responseId)).toBeNull();
-    const rows = await getDB().select().from(apiResponseDeletionT).where(
-      and(eq(apiResponseDeletionT.organizationId, orgId), eq(apiResponseDeletionT.responseId, dbResponseId)),
-    );
-    expect(rows).toHaveLength(1);
-  });
-
-  it("rejects stale cached data when the Redis deletion marker is missing", async () => {
-    if (!orgId) throw new Error("Organization setup did not complete");
-
-    await saveResponse(orgId, staleResponseId, makeResponse("in_progress", staleResponseId), {
-      apiKeyId: null,
-      applicationId: null,
-      inferenceCallId: null,
-      inputMessages: [],
-    });
-    expect(await deleteResponse(orgId, staleResponseId)).toBe(true);
-
-    const key = `response:${orgId}:${staleResponseId}`;
-    await redis.send("DEL", [`${key}:deleted`]);
-    await redis.send("SET", [key, JSON.stringify(makeResponse("completed", staleResponseId)), "EX", "60"]);
-
-    expect(await getResponse(orgId, staleResponseId)).toBeNull();
   });
 
   it("does not resurrect a response when deletion races with completion", async () => {
@@ -104,14 +74,6 @@ describe.skipIf(!enabled)("response deletion integration (PostgreSQL + Redis)", 
 
     expect(deleted).toBe(true);
     expect(await getResponse(orgId, raceResponseId)).toBeNull();
-
-    const tombstones = await getDB().select().from(apiResponseDeletionT).where(
-      and(
-        eq(apiResponseDeletionT.organizationId, orgId),
-        eq(apiResponseDeletionT.responseId, raceDbResponseId),
-      ),
-    );
-    expect(tombstones).toHaveLength(1);
 
     const responseRows = await getDB().select().from(apiResponseT).where(
       and(eq(apiResponseT.organizationId, orgId), eq(apiResponseT.id, raceDbResponseId)),

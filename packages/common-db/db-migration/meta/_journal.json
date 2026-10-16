@@ -120,20 +120,6 @@
       "when": 1789685920831,
       "tag": "0016_dynamic_config_notifications",
       "breakpoints": true
-    },
-    {
-      "idx": 17,
-      "version": "7",
-      "when": 1792009422072,
-      "tag": "0017_true_lorna_dane",
-      "breakpoints": true
-    },
-    {
-      "idx": 18,
-      "version": "7",
-      "when": 1792012752851,
-      "tag": "0018_wealthy_lenny_balinger",
-      "breakpoints": true
     }
   ]
 }

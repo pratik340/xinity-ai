@@ -153,18 +153,6 @@ export const apiResponseT = callDataSchema.table("api_response", {
 export type ApiResponse = InferSelectModel<typeof apiResponseT>;
 
 
-/** Durable record preventing a deleted response ID from being recreated by late writes. */
-export const apiResponseDeletionT = callDataSchema.table("api_response_deletion", {
-  responseId: uuid("response_id").notNull(),
-  organizationId: text("organization_id")
-    .notNull()
-    .references(() => organizationT.id, { onDelete: "cascade" }),
-  deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
-}, table => [
-  primaryKey({ columns: [table.organizationId, table.responseId] }),
-]);
-export type ApiResponseDeletion = InferSelectModel<typeof apiResponseDeletionT>;
-
 /** Output items in emission order, inserted when the response settles rather than as they
  * arrive, so a long run does not rewrite a growing list. `seq` doubles as the
  * `input_items` pagination cursor. */

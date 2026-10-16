@@ -184,19 +184,17 @@ describe("createPersistedResponse", () => {
       inputMessages: [],
     });
     const insert = capturedQueries.find((q) => /^\s*insert/i.test(q.sql) && q.sql.includes("api_response"));
-    expect(capturedQueries.some((q) => q.sql.includes("pg_advisory_xact_lock"))).toBe(true);
     expect(insert?.params).toContain("in_progress");
     expect(insert?.params).not.toContain("completed");
   });
 
-  test("does not reference messages when the row already existed", async () => {
+  test("does not record input messages when response insert returns no row", async () => {
     await createPersistedResponse({
       response: makeResponse(),
       ...OWNER,
       inputMessages: [{ role: "user", content: "Hi" }],
     });
-    expect(capturedQueries.some((q) => q.sql.includes("pg_advisory_xact_lock"))).toBe(true);
-    expect(capturedQueries.some((q) => /api_response_deletion/i.test(q.sql))).toBe(true);
+    expect(capturedQueries.some((q) => /^\s*insert/i.test(q.sql) && /api_response_message/i.test(q.sql))).toBe(false);
   });
 });
 

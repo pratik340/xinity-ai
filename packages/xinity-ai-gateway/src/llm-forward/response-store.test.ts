@@ -14,6 +14,7 @@ const db = drizzle.mock();
 const capturedQueries: Array<{ sql: string; params: unknown[] }> = [];
 /** Rows the next select should yield, standing in for a row Redis no longer has. */
 let selectRows: unknown[] = [];
+let settleRows: unknown[] = [];
 let failNextQuery = false;
 
 const preparedProto = Object.getPrototypeOf(db.select().from(apiResponseT).prepare("_spy"));
@@ -27,10 +28,10 @@ jest.spyOn(preparedProto, "execute").mockImplementation(async function (this: { 
     return [{ id: UUID_A }];
   }
   if (/^\s*select/i.test(this.queryString)) {
-    if (this.queryString.includes('"api_response_deletion"')) {
-      return [];
-    }
     return selectRows;
+  }
+  if (/^\s*update/i.test(this.queryString)) {
+    return settleRows;
   }
   return [];
 });
@@ -49,6 +50,7 @@ const sqlOf = (pattern: RegExp) => capturedQueries.filter((q) => pattern.test(q.
 beforeEach(() => {
   capturedQueries.length = 0;
   selectRows = [];
+  settleRows = [{ id: UUID_A }];
   failNextQuery = false;
   redisGet.mockClear().mockResolvedValue(null);
   redisSet.mockClear().mockResolvedValue("OK" as never);
@@ -102,30 +104,34 @@ const CREATION = { apiKeyId: "key-1", applicationId: "app-1", inferenceCallId: n
 describe("saveResponse", () => {
   test("records a new response when given creation context", async () => {
     await saveResponse("org-1", RESP_A, makeResponse(), CREATION);
-    expect(redisSend).toHaveBeenCalled();
+    expect(redisSet).toHaveBeenCalled();
     expect(sqlOf(/^\s*insert into "call_data"\."api_response"/i)).toHaveLength(1);
   });
 
   test("treats an in-progress write without creation context as cache-only", async () => {
     await saveResponse("org-1", RESP_A, makeResponse());
-    expect(redisSend).toHaveBeenCalled();
+    expect(redisSet).toHaveBeenCalled();
     expect(capturedQueries).toHaveLength(0);
   });
 
-  test("does not persist a response when the atomic cache write rejects it", async () => {
-    redisSend.mockResolvedValueOnce(0 as never);
+  test("does not cache a settled response when no in-progress row was updated", async () => {
+    settleRows = [];
 
     await saveResponse("org-1", RESP_A, makeResponse({ status: "completed" }));
 
-    expect(capturedQueries).toHaveLength(0);
+    expect(sqlOf(/^\s*update/i)).toHaveLength(1);
+    expect(redisSet).not.toHaveBeenCalled();
   });
 
-  test("does not persist a late response write after deletion marker blocks cache", async () => {
-    redisSend.mockResolvedValueOnce(0 as never);
+  test("settles in Postgres before caching a response", async () => {
+    redisSet.mockImplementation(async () => {
+      expect(sqlOf(/^\s*update/i)).toHaveLength(1);
+      return "OK" as never;
+    });
 
-    await saveResponse("org-1", RESP_A, makeResponse({ status: "completed" }), CREATION);
+    await saveResponse("org-1", RESP_A, makeResponse({ status: "completed" }));
 
-    expect(capturedQueries).toHaveLength(0);
+    expect(redisSet).toHaveBeenCalled();
   });
 
   test.each(["completed", "failed", "incomplete", "cancelled"] as const)("settles on %s", async (status) => {
@@ -139,29 +145,18 @@ describe("saveResponse", () => {
   test("keeps a store:false response out of Postgres entirely", async () => {
     await saveResponse("org-1", RESP_A, makeResponse({ store: false }), CREATION);
     await saveResponse("org-1", RESP_A, makeResponse({ store: false, status: "completed" }));
-    expect(redisSend).toHaveBeenCalledTimes(2);
+    expect(redisSet).toHaveBeenCalledTimes(2);
     expect(capturedQueries).toHaveLength(0);
   });
 
   test("does not fail the write when Postgres does", async () => {
     failNextQuery = true;
     await saveResponse("org-1", RESP_A, makeResponse(), CREATION);
-    expect(redisSend).toHaveBeenCalled();
+    expect(redisSet).toHaveBeenCalled();
   });
 });
 
 describe("getResponse", () => {
-  test("checks durable deletion before serving a cached response", async () => {
-    const response = makeResponse({ status: "completed" });
-    redisGet.mockImplementation(async (key: string) =>
-      key.endsWith(":deleted") ? null : JSON.stringify(response)
-    );
-
-    expect(await getResponse("org-1", RESP_A)).toEqual(response);
-    expect(capturedQueries).toHaveLength(1);
-    expect(capturedQueries[0]?.sql).toContain("api_response_deletion");
-  });
-
   test("falls back to Postgres once Redis has expired the entry", async () => {
     selectRows = [headerRow()];
     const recovered = await getResponse("org-1", RESP_A) as ResponseObject;
@@ -174,24 +169,15 @@ describe("getResponse", () => {
   test("re-caches what it recovered from Postgres", async () => {
     selectRows = [headerRow()];
     await getResponse("org-1", RESP_A);
-    expect(redisSend).toHaveBeenCalled();
+    expect(redisSet).toHaveBeenCalled();
   });
 
   test("returns null when neither tier has it", async () => {
     expect(await getResponse("org-1", RESP_A)).toBeNull();
   });
 
-  test("does not fall back to Postgres when a deletion marker exists", async () => {
-    redisGet.mockImplementation(async (key: string) =>
-      key.endsWith(":deleted") ? "1" : null
-    );
-
-    expect(await getResponse("org-1", RESP_A)).toBeNull();
-    expect(capturedQueries).toHaveLength(0);
-  });
-
   test("falls back to Postgres when the cached entry is corrupt", async () => {
-    redisGet.mockImplementation(async (key: string) => key.endsWith(":deleted") ? null : "{not json");
+    redisGet.mockResolvedValue("{not json");
     selectRows = [headerRow()];
     expect(await getResponse("org-1", RESP_A)).not.toBeNull();
   });
@@ -205,14 +191,14 @@ describe("getResponse", () => {
   test("does not slide the cache expiry on read", async () => {
     redisGet.mockResolvedValue(JSON.stringify(makeResponse()));
     await getResponse("org-1", RESP_A);
-    expect(redisSend).not.toHaveBeenCalled();
+    expect(redisSet).not.toHaveBeenCalled();
   });
 });
 
 describe("deleteResponse", () => {
   test("removes the response from both tiers", async () => {
     expect(await deleteResponse("org-1", RESP_A)).toBe(true);
-    expect(redisSend).toHaveBeenCalled();
+    expect(redisDel).toHaveBeenCalled();
     expect(sqlOf(/^\s*delete/i)).toHaveLength(1);
   });
 });
